@@ -9,7 +9,7 @@ void plotErrorGraph() {
     const std::string dataDir = "../../scan_registration_data/";
 
 	int scanNo1 = 180;
-	int step = 5;
+	int step = 15;
 
 
     std::string gicpFileName = "%strans_gicp/trans_gicp_%d_%d";
@@ -117,7 +117,7 @@ statisticalPlot() {
     int scanStepXL = 20;
     
     std::string gicpFileName = "%strans_gicp/trans_gicp_%d_%d";
-    std::string resultFileName = "%strans_scan_mi_nmsimplex/trans_result_%d_%d";
+    std::string resultFileName = "%strans_scan_mi/trans_result_%d_%d";
     std::string gtFileName = "%sTRANS_GT/trans_%d_%d";
     std::string fileString;
     int scanNo2 = 0;
@@ -414,11 +414,11 @@ plotForX(Eigen::Affine3d& t, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::Poi
         pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformedScanB = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBA> > (new pcl::PointCloud<pcl::PointXYZRGBA> ());
         pcl::transformPointCloud(*B, *transformedScanB, transform);
         
-        double mi = calculateMI(A, transformedScanB, 1);
+        double mi = calculateMIFromMap(A, transformedScanB, 1);
         
         std::cout << "X: " << xVar << " MI: " << mi << std::endl;
         
-        data.push_back(std::pair<double, double> (xVar, mi));
+        data.push_back(std::pair<double, double> (xVar, -mi));
         
         xVar += plotStepTrans;
     }
@@ -450,10 +450,10 @@ plotForY(Eigen::Affine3d& t, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::Poi
         pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformedScanB = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBA> > (new pcl::PointCloud<pcl::PointXYZRGBA> ());
         pcl::transformPointCloud(*B, *transformedScanB, transform);
         
-        double mi = calculateMI(A, transformedScanB, 1);
+        double mi = calculateMIFromMap(A, transformedScanB, 1);
         std::cout << "Y: " << yVar << " MI: " << mi << std::endl;
         
-        data.push_back(std::pair<double, double> (yVar, mi));
+        data.push_back(std::pair<double, double> (yVar, -mi));
         
         yVar += plotStepTrans;
     }
@@ -485,10 +485,10 @@ plotForZ(Eigen::Affine3d& t, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::Poi
         pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformedScanB = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBA> > (new pcl::PointCloud<pcl::PointXYZRGBA> ());
         pcl::transformPointCloud(*B, *transformedScanB, transform);
         
-        double mi = calculateMI(A, transformedScanB, 1);
+        double mi = calculateMIFromMap(A, transformedScanB, 1);
         std::cout << "Z: " << zVar << " MI: " << mi << std::endl;
         
-        data.push_back(std::pair<double, double> (zVar, mi));
+        data.push_back(std::pair<double, double> (zVar, -mi));
         
         zVar += plotStepTrans;
     }
@@ -524,10 +524,10 @@ plotForRoll(Eigen::Affine3d& t, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::
         pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformedScanB = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBA> > (new pcl::PointCloud<pcl::PointXYZRGBA> ());
         pcl::transformPointCloud(*B, *transformedScanB, transform);
         
-        double mi = calculateMI(A, transformedScanB, 1);
+        double mi = calculateMIFromMap(A, transformedScanB, 1);
         std::cout << "Roll: " << rollVar << " MI: " << mi << std::endl;
         
-        data.push_back(std::pair<double, double> (rollDegree, mi));
+        data.push_back(std::pair<double, double> (rollDegree, -mi));
         rollDegree += plotStepAngle;
         
     }
@@ -562,10 +562,10 @@ void plotForPitch (Eigen::Affine3d& t, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A
         pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformedScanB = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBA> > (new pcl::PointCloud<pcl::PointXYZRGBA> ());
         pcl::transformPointCloud(*B, *transformedScanB, transform);
         
-        double mi = calculateMI(A, transformedScanB, 1);
+        double mi = calculateMIFromMap(A, transformedScanB, 1);
         std::cout << "Pitch: " << pitchVar << " MI: " << mi << std::endl;
         
-        data.push_back(std::pair<double, double> (pitchDegree, mi));
+        data.push_back(std::pair<double, double> (pitchDegree, -mi));
         pitchDegree += plotStepAngle;
         
     }
@@ -600,10 +600,10 @@ void plotForYaw (Eigen::Affine3d& t, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, 
         pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformedScanB = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBA> > (new pcl::PointCloud<pcl::PointXYZRGBA> ());
         pcl::transformPointCloud(*B, *transformedScanB, transform);
         
-        double mi = calculateMI(A, transformedScanB, 1);
+        double mi = calculateMIFromMap(A, transformedScanB, 1);
         std::cout << "Yaw: " << yawVar << " MI: " << mi << std::endl;
         
-        data.push_back(std::pair<double, double> (yawDegree, mi));
+        data.push_back(std::pair<double, double> (yawDegree, -mi));
         yawDegree += plotStepAngle;
         
     }

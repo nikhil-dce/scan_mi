@@ -4,10 +4,10 @@
 #include "mi_util.h"
 #include "mi_cost.h"
 
-static float plotRangeTrans = 0.;
+static float plotRangeTrans = 1.;
 static float plotStepTrans = 0.1;
 
-static float plotRangeAngle = 0;
+static float plotRangeAngle = 30;
 static float plotStepAngle = 1;
 
 void

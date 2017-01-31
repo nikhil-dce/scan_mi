@@ -40,7 +40,7 @@ void
 naivePoseSearch (pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, Eigen::Affine3d& transform);
 
 void
-registerPointCloudsUsingPatternSearch (Eigen::Affine3d& baseT, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, Eigen::Affine3d& result);
+registerPointCloudsUsingPatternSearch (Eigen::Affine3d& baseT, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, Eigen::Affine3d& result, int scanDiff);
 
 void
 branchAndBoundSearch (
@@ -138,23 +138,6 @@ int main (int argc, char *argv[]) {
 
 	/*
   // Numerical Gradient Test
-  optiData* data = new optiData();
-  data->scanA = scanA;
-  data->scanB = scanB;
-
-  gsl_vector* testPose = gsl_vector_alloc(6);
-  gsl_vector_set_all (testPose, 0);
-  gsl_vector_set (testPose, 1, 5.);
-
-  f(testPose, data);
-  return 0;
-
-  std :: cout << "dx: " << gsl_vector_get (g, 0) << std::endl;
-  std :: cout << "dy: " << gsl_vector_get (g, 1) << std::endl;
-  std :: cout << "dz: " << gsl_vector_get (g, 2) << std::endl;
-  std :: cout << "droll: " << gsl_vector_get (g, 3) << std::endl;
-  std :: cout << "dpitch: " << gsl_vector_get (g, 4) << std::endl; 
-  std :: cout << "dyaw: " << gsl_vector_get (g, 5) << std::endl;
 
   boost::timer::cpu_times elapsed = timer.elapsed();
   std::cout << "Time take for derivative: " << (elapsed.user + elapsed.system) / 1e9 << " seconds" << " Actual Time: " << elapsed.wall / 1e9 << " seconds" << std::endl;
@@ -191,16 +174,43 @@ int main (int argc, char *argv[]) {
 
 	Eigen::Affine3d transformation = trans.inverse();
 
+
 	if (onlyCost) {
 
-		pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformedB = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBA> > (new pcl::PointCloud<pcl::PointXYZRGBA> ());
-		pcl::transformPointCloud(*scanB, *transformedB, transformation);
-		double mi = calculateMIFromMap(scanA, transformedB, 1);
 
-		std::cout << "MI: " << mi << std::endl;
+		double x, y, z, roll, pitch, yaw;
+
+		transform_get_translation_from_affine(transformation, &x, &y, &z);
+		transform_get_rotation_xyz_from_affine(transformation, &roll, &pitch, &yaw);
+
+		optiData* data = new optiData();
+		data->scanA = scanA;
+		data->scanB = scanB;
+
+		gsl_vector* testPose = gsl_vector_alloc(6);
+		gsl_vector_set (testPose, 0, x);
+		gsl_vector_set (testPose, 1, y);
+		gsl_vector_set (testPose, 2, z);
+		gsl_vector_set (testPose, 3, roll);
+		gsl_vector_set (testPose, 4, pitch);
+		gsl_vector_set (testPose, 5, yaw);
+
+		double cost(0);
+		gsl_vector* g;
+		g = gsl_vector_alloc (6);
+		fdf(testPose, data, &cost, g);
+
+		std::cout << "Cost: " << cost << std::endl;
+
+		std :: cout << "dx: " << gsl_vector_get (g, 0) << std::endl;
+		std :: cout << "dy: " << gsl_vector_get (g, 1) << std::endl;
+		std :: cout << "dz: " << gsl_vector_get (g, 2) << std::endl;
+		std :: cout << "droll: " << gsl_vector_get (g, 3) << std::endl;
+		std :: cout << "dpitch: " << gsl_vector_get (g, 4) << std::endl;
+		std :: cout << "dyaw: " << gsl_vector_get (g, 5) << std::endl;
 
 		boost::timer::cpu_times elapsed = timer.elapsed();
-		std::cout << "MI Calculation CPU Time: " << (elapsed.user + elapsed.system) / 1e9 << " seconds" << " Actual Time: " << elapsed.wall / 1e9 << " seconds" << std::endl;
+		std::cout << "fdf CPU Time: " << (elapsed.user + elapsed.system) / 1e9 << " seconds" << " Actual Time: " << elapsed.wall / 1e9 << " seconds" << std::endl;
 
 		return 0;
 	}
@@ -241,8 +251,8 @@ int main (int argc, char *argv[]) {
 	} else {
 
 		Eigen::Affine3d result;
-		registerPointCloudsUsingPatternSearch(transformation, scanA, scanB, result);
-		//registerPointClouds(transformation, scanA, scanB, result);
+//		registerPointCloudsUsingPatternSearch(transformation, scanA, scanB, result, abs(s2-s1));
+		registerPointClouds(transformation, scanA, scanB, result);
 
 		boost::timer::cpu_times elapsed = timer.elapsed();
 
@@ -289,10 +299,12 @@ registerPointClouds(Eigen::Affine3d& baseT, pcl::PointCloud<pcl::PointXYZRGBA>::
 	std::cout << "Pitch: " << pitch << std::endl;
 	std::cout << "Yaw: " << yaw << std::endl;
 
-	//const gsl_multimin_fminimizer_type *T = gsl_multimin_fminimizer_nmsimplex2;
-	const gsl_multimin_fdfminimizer_type *T = gsl_multimin_fdfminimizer_steepest_descent;//gsl_multimin_fdfminimizer_vector_bfgs2;
+//	const gsl_multimin_fdfminimizer_type *T = gsl_multimin_fdfminimizer_steepest_descent;
+//	const gsl_multimin_fdfminimizer_type *T = gsl_multimin_fdfminimizer_vector_bfgs2;
+	const gsl_multimin_fdfminimizer_type *T = gsl_multimin_fdfminimizer_conjugate_fr;
+
 	gsl_multimin_fdfminimizer *s = NULL;
-	gsl_vector *stepSize, *basePose;
+	gsl_vector *basePose;
 
 	//gsl_multimin_function func;
 	gsl_multimin_function_fdf func;
@@ -306,24 +318,12 @@ registerPointClouds(Eigen::Affine3d& baseT, pcl::PointCloud<pcl::PointXYZRGBA>::
 	gsl_vector_set (basePose, 4, pitch);
 	gsl_vector_set (basePose, 5, yaw);
 
-	/* Set initial step sizes to 1 */
-	stepSize = gsl_vector_alloc (6);
-	gsl_vector_set (stepSize, 0, 5);
-	gsl_vector_set (stepSize, 1, 5);
-	gsl_vector_set (stepSize, 2, 5);
-	gsl_vector_set (stepSize, 3, 0.5);
-	gsl_vector_set (stepSize, 4, 0.5);
-	gsl_vector_set (stepSize, 5, 0.5);
-
 	/* Initialize method and iterate */
 	func.n = 6;
 	func.f = f;
 	func.df = df;
 	func.fdf = fdf;
 	func.params = (void*) data;
-
-	//s = gsl_multimin_fminimizer_alloc (T, 6);
-	//gsl_multimin_fminimizer_set (s, &func, basePose, stepSize);
 
 	s = gsl_multimin_fdfminimizer_alloc (T, 6);
 	gsl_multimin_fdfminimizer_set (s, &func, basePose, 0.01, 1e-4);
@@ -335,7 +335,6 @@ registerPointClouds(Eigen::Affine3d& baseT, pcl::PointCloud<pcl::PointXYZRGBA>::
 	do  {
 
 		iter++;
-		//status = gsl_multimin_fminimizer_iterate(s);
 
 		status = gsl_multimin_fdfminimizer_iterate (s);
 
@@ -343,9 +342,6 @@ registerPointClouds(Eigen::Affine3d& baseT, pcl::PointCloud<pcl::PointXYZRGBA>::
 
 		if (status)
 			break;
-
-		//size = gsl_multimin_fminimizer_size (s);
-		//status = gsl_multimin_test_size (size, 1e-3);
 
 		status = gsl_multimin_test_gradient (s->gradient, 1e-3);
 
@@ -363,8 +359,6 @@ registerPointClouds(Eigen::Affine3d& baseT, pcl::PointCloud<pcl::PointXYZRGBA>::
 		std::cout << "Roll: " << gsl_vector_get (s->x, 3) << std::endl;
 		std::cout << "Pitch: " << gsl_vector_get (s->x, 4) << std::endl;
 		std::cout << "Yaw: " << gsl_vector_get (s->x, 5) << std::endl;
-
-		//std::cout << "Size: " << size << std::endl;
 
 	}   while (status == GSL_CONTINUE && iter < 500);
 
@@ -387,7 +381,7 @@ registerPointClouds(Eigen::Affine3d& baseT, pcl::PointCloud<pcl::PointXYZRGBA>::
 }
 
 void
-registerPointCloudsUsingPatternSearch (Eigen::Affine3d& baseT, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, Eigen::Affine3d& result) {
+registerPointCloudsUsingPatternSearch (Eigen::Affine3d& baseT, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, Eigen::Affine3d& result, int scanDiff) {
 
 	// cost -->
 
@@ -426,15 +420,37 @@ registerPointCloudsUsingPatternSearch (Eigen::Affine3d& baseT, pcl::PointCloud<p
 	gsl_vector_set (basePose, 4, pitch);
 	gsl_vector_set (basePose, 5, yaw);
 
-	/* Set initial step sizes to 1 */
-	stepSize = gsl_vector_alloc (6);
-	gsl_vector_set (stepSize, 0, 5);
-	gsl_vector_set (stepSize, 1, 5);
-	gsl_vector_set (stepSize, 2, 2);
-	gsl_vector_set (stepSize, 3, 0.5);
-	gsl_vector_set (stepSize, 4, 0.5);
-	gsl_vector_set (stepSize, 5, 0.5);
-
+    stepSize = gsl_vector_alloc (6);
+    if (scanDiff <= 5) {
+        gsl_vector_set (stepSize, 0, 5);
+        gsl_vector_set (stepSize, 1, 5);
+        gsl_vector_set (stepSize, 2, 2);
+        gsl_vector_set (stepSize, 3, 0.2);
+        gsl_vector_set (stepSize, 4, 0.2);
+        gsl_vector_set (stepSize, 5, 0.5);
+    } else if (scanDiff <= 10) {
+        gsl_vector_set (stepSize, 0, 10);
+        gsl_vector_set (stepSize, 1, 10);
+        gsl_vector_set (stepSize, 2, 2);
+        gsl_vector_set (stepSize, 3, 0.5);
+        gsl_vector_set (stepSize, 4, 0.5);
+        gsl_vector_set (stepSize, 5, 0.5);
+    } else if (scanDiff <= 15) {
+        gsl_vector_set (stepSize, 0, 15);
+        gsl_vector_set (stepSize, 1, 15);
+        gsl_vector_set (stepSize, 2, 5);
+        gsl_vector_set (stepSize, 3, 0.5);
+        gsl_vector_set (stepSize, 4, 0.5);
+        gsl_vector_set (stepSize, 5, 1.);
+    } else {
+        gsl_vector_set (stepSize, 0, 20);
+        gsl_vector_set (stepSize, 1, 20);
+        gsl_vector_set (stepSize, 2, 5);
+        gsl_vector_set (stepSize, 3, 0.5);
+        gsl_vector_set (stepSize, 4, 0.5);
+        gsl_vector_set (stepSize, 5, 1.);
+    }
+	
 	/* Initialize method and iterate */
 	func.n = 6;
 	func.f = f;
@@ -621,6 +637,8 @@ branchAndBoundSearch (
 
 			while (yVar < (y+transRange) ) {
 
+				// change the coords
+				// this is incorrect
 				t.translation() << xVar, yVar, z;
 				pcl::transformPointCloud(*B, *transformedScanB, t);
 
