@@ -1,18 +1,25 @@
+#include "mi_util.h"
+#include "mi_optimize.h"
+#include "mi_plotter.h"
+
 #include <string>
+#include <queue>
 #include <boost/program_options.hpp>
 #include <boost/shared_ptr.hpp>
 #include <boost/format.hpp>
-#include <boost/unordered_map.hpp>
+#include <boost/timer/timer.hpp>
 
 #include <pcl/common/transforms.h>
-#include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
 #include <pcl/point_cloud.h>
 #include <pcl/octree/octree_pointcloud.h>
 #include <pcl/visualization/pcl_plotter.h>
+#include <pcl/io/pcd_io.h>
+
+#include <gsl/gsl_multimin.h>
+#include <gsl/gsl_deriv.h>
 
 static std::string DATA_DIR = "../../scan_registration_data/";
-static float RESOLUTION = 1.;
 static std::string transFilename;
 static bool plotJointHistogram = false;
 static bool plotX = false;
@@ -21,41 +28,25 @@ static bool plotZ = false;
 static bool plotRoll = false;
 static bool plotPitch = false;
 static bool plotYaw = false;
-
-static float plotRangeTrans = 0.;
-static float plotStepTrans = 0.;
-
-static float plotRangeAngle = 0;
-static float plotStepAngle = 0;
-
-void inline
-transform_get_translation_from_affine(Eigen::Affine3d& t, double *x, double *y, double *z);
-void inline
-transform_get_rotation_xyz_from_affine(Eigen::Affine3d& t, double *x, double *y, double *z);
+static float RESOLUTION = 1.;
+static bool onlyCost = false;
+static bool plotStats = false;
+static bool plotError = false;
 
 void
-loadTransform(std::string filename, Eigen::Affine3d& transform);
+registerPointClouds (Eigen::Affine3d& transform, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, Eigen::Affine3d& result);
 
-double
-calculateMI(pcl::PointCloud<pcl::PointXYZRGBA>::Ptr scanA, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr scanB);
-
-void
-plotForX(Eigen::Affine3d& transform, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, pcl::visualization::PCLPlotter *plotter);
+void 
+naivePoseSearch (pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, Eigen::Affine3d& transform);
 
 void
-plotForY(Eigen::Affine3d& transform, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, pcl::visualization::PCLPlotter *plotter);
+registerPointCloudsUsingPatternSearch (Eigen::Affine3d& baseT, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, Eigen::Affine3d& result);
 
 void
-plotForZ(Eigen::Affine3d& transform, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, pcl::visualization::PCLPlotter *plotter);
-
-void
-plotForRoll(Eigen::Affine3d& transform, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, pcl::visualization::PCLPlotter *plotter);
-
-void
-plotForPitch(Eigen::Affine3d& transform, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, pcl::visualization::PCLPlotter *plotter);
-
-void
-plotForYaw(Eigen::Affine3d& transform, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, pcl::visualization::PCLPlotter *plotter);
+branchAndBoundSearch (
+		pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A,
+		pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B,
+		Eigen::Affine3d& transform);
 
 
 int initOptions(int argc, char* argv[]) {
@@ -64,22 +55,25 @@ int initOptions(int argc, char* argv[]) {
 	po::options_description desc ("Allowed Options");
 
 	desc.add_options()
-							("help,h", "Usage <Scan 1 Path> <Scan 2 Path> <Transform File>")
+    		("help,h", "Usage <Scan 1 Path> <Scan 2 Path> <Transform File>")
+    		("plotStats", po::value<bool>(&plotStats), "Plot Statistical Data")
+    		("plotError", po::value<bool>(&plotError), "Plot Error")
+    		("onlyCost", po::value<bool>(&onlyCost), "Print only the cost")
 
-							("plotX", po::value<bool>(&plotX), "PlotX Score Data")
-							("plotY", po::value<bool>(&plotY), "PlotY Score Data")
-							("plotZ", po::value<bool>(&plotZ), "PlotZ Score Data")
-							("plotRoll", po::value<bool>(&plotRoll), "PlotRoll Score Data")
-							("plotPitch", po::value<bool>(&plotPitch), "PlotPitch Score Data")
-							("plotYaw", po::value<bool>(&plotYaw), "PlotYaw Score Data")
+    		("plotX", po::value<bool>(&plotX), "PlotX Score Data")
+    		("plotY", po::value<bool>(&plotY), "PlotY Score Data")
+    		("plotZ", po::value<bool>(&plotZ), "PlotZ Score Data")
+    		("plotRoll", po::value<bool>(&plotRoll), "PlotRoll Score Data")
+    		("plotPitch", po::value<bool>(&plotPitch), "PlotPitch Score Data")
+    		("plotYaw", po::value<bool>(&plotYaw), "PlotYaw Score Data")
 
-							("plotRangeTrans", po::value<float>(&plotRangeTrans), "Translation Range to plot")
-							("plotStepTrans", po::value<float>(&plotStepTrans), "Translation steps while plotting")
+    		("plotRangeTrans", po::value<float>(&plotRangeTrans), "Translation Range to plot")
+    		("plotStepTrans", po::value<float>(&plotStepTrans), "Translation steps while plotting")
 
-							("plotRangeAngle", po::value<float>(&plotRangeAngle), "Rotation Range to plot")
-							("plotStepAngle", po::value<float>(&plotStepAngle), "Rotation steps while plotting")
+    		("plotRangeAngle", po::value<float>(&plotRangeAngle), "Rotation Range to plot")
+    		("plotStepAngle", po::value<float>(&plotStepAngle), "Rotation steps while plotting")
 
-							("joint_histogram", po::value<bool>(&plotJointHistogram), "Plot Joint Histogram");
+    		("joint_histogram", po::value<bool>(&plotJointHistogram), "Plot Joint Histogram");
 
 	po::variables_map vm;
 	po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -94,16 +88,23 @@ int initOptions(int argc, char* argv[]) {
 
 }
 
-int
-main (int argc, char *argv[]) {
+int main (int argc, char *argv[]) {
+
+	if (initOptions(argc, argv))
+		return 0;
+
+	if (plotStats) {
+		statisticalPlot();
+		return 0;
+	} else if (plotError) {
+		plotErrorGraph();
+		return 0;
+	}
 
 	if (argc < 4) {
 		std::cerr << "Invalid Arguments " << std::endl;
 		return 1;
 	}
-
-	if (initOptions(argc, argv))
-		return 0;
 
 	int s1, s2;
 
@@ -132,588 +133,523 @@ main (int argc, char *argv[]) {
 	ss.str(std::string());
 	loadTransform(transFilename, trans);
 
+	boost::timer::cpu_timer timer;
+
+
+	/*
+  // Numerical Gradient Test
+  optiData* data = new optiData();
+  data->scanA = scanA;
+  data->scanB = scanB;
+
+  gsl_vector* testPose = gsl_vector_alloc(6);
+  gsl_vector_set_all (testPose, 0);
+  gsl_vector_set (testPose, 1, 5.);
+
+  f(testPose, data);
+  return 0;
+
+  std :: cout << "dx: " << gsl_vector_get (g, 0) << std::endl;
+  std :: cout << "dy: " << gsl_vector_get (g, 1) << std::endl;
+  std :: cout << "dz: " << gsl_vector_get (g, 2) << std::endl;
+  std :: cout << "droll: " << gsl_vector_get (g, 3) << std::endl;
+  std :: cout << "dpitch: " << gsl_vector_get (g, 4) << std::endl; 
+  std :: cout << "dyaw: " << gsl_vector_get (g, 5) << std::endl;
+
+  boost::timer::cpu_times elapsed = timer.elapsed();
+  std::cout << "Time take for derivative: " << (elapsed.user + elapsed.system) / 1e9 << " seconds" << " Actual Time: " << elapsed.wall / 1e9 << " seconds" << std::endl;
+  onlyCost = true;
+
+
+
+
+  // Naive Search
+  Eigen::Affine3d test = trans.inverse();
+    branchAndBoundSearch (scanA, scanB, test);
+  //naivePoseSearch ( scanA, scanB, test);
+  boost::timer::cpu_times elapsed = timer.elapsed();
+  std::cout << "Time taken for naive search: " << (elapsed.user + elapsed.system) / 1e9 << " seconds" << " Actual Time: " << elapsed.wall / 1e9 << " seconds" << std::endl;
+  return 0;
+	 */
+
+	/*
+    // Check mapping function
+    pcl::PointCloud<pcl::PointXYZRGBL>::Ptr c = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBL> > (new pcl::PointCloud<pcl::PointXYZRGBL> ());
+    Eigen::Affine3d test = trans.inverse();
+
+    double mi = calculateMIFromMap(scanA, scanB, 1);
+    std::cout << "MI: " << mi << std::endl;
+
+    boost::timer::cpu_times elapsed = timer.elapsed();
+    std::cout << "Time taken for mapping function : " << (elapsed.user + elapsed.system) / 1e9 << " seconds" << " Actual Time: " << elapsed.wall / 1e9 << " seconds" << std::endl;
+
+    onlyCost = true;
+	 */
+
 	ss.str(std::string());
 	// data loaded
 
 	Eigen::Affine3d transformation = trans.inverse();
 
-	// transformation
+	if (onlyCost) {
 
-	pcl::visualization::PCLPlotter *plotter;
-	plotter = new pcl::visualization::PCLPlotter("Mutual Information");
-	plotter->setYTitle("Mutual Information");
-	plotter->setTitle(transFilename.c_str());
+		pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformedB = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBA> > (new pcl::PointCloud<pcl::PointXYZRGBA> ());
+		pcl::transformPointCloud(*scanB, *transformedB, transformation);
+		double mi = calculateMIFromMap(scanA, transformedB, 1);
 
-	if (plotX) {
-		plotForX(transformation, scanA, scanB, plotter);
+		std::cout << "MI: " << mi << std::endl;
+
+		boost::timer::cpu_times elapsed = timer.elapsed();
+		std::cout << "MI Calculation CPU Time: " << (elapsed.user + elapsed.system) / 1e9 << " seconds" << " Actual Time: " << elapsed.wall / 1e9 << " seconds" << std::endl;
+
+		return 0;
 	}
 
-	if (plotY) {
-		plotForY(transformation, scanA, scanB, plotter);
-	}
+	if (plotX || plotY || plotZ || plotRoll || plotPitch || plotYaw) {
 
-	if (plotZ) {
-		plotForZ(transformation, scanA, scanB, plotter);
-	}
+		pcl::visualization::PCLPlotter *plotter;
+		plotter = new pcl::visualization::PCLPlotter("Mutual Information");
+		plotter->setYTitle("Mutual Information");
+		plotter->setTitle(transFilename.c_str());
 
-	if (plotRoll) {
-		plotForRoll(transformation, scanA, scanB, plotter);
-	}
+		if (plotX) {
+			plotForX(transformation, scanA, scanB, plotter);
+		}
 
-	if (plotPitch) {
-		plotForPitch(transformation, scanA, scanB, plotter);
-	}
+		if (plotY) {
+			plotForY(transformation, scanA, scanB, plotter);
+		}
 
-	if (plotYaw) {
-		plotForYaw(transformation, scanA, scanB, plotter);
-	}
+		if (plotZ) {
+			plotForZ(transformation, scanA, scanB, plotter);
+		}
 
-	plotter->plot();
+		if (plotRoll) {
+			plotForRoll(transformation, scanA, scanB, plotter);
+		}
+
+		if (plotPitch) {
+			plotForPitch(transformation, scanA, scanB, plotter);
+		}
+
+		if (plotYaw) {
+			plotForYaw(transformation, scanA, scanB, plotter);
+		}
+
+		plotter->plot();
+
+	} else {
+
+		Eigen::Affine3d result;
+		registerPointCloudsUsingPatternSearch(transformation, scanA, scanB, result);
+		//registerPointClouds(transformation, scanA, scanB, result);
+
+		boost::timer::cpu_times elapsed = timer.elapsed();
+
+		double cpuTime = (elapsed.user + elapsed.system) / 1e9;
+		double elapsedTime = elapsed.wall / 1e9;
+
+		std::cout << "Total CPU Time: " <<  cpuTime << " seconds" << " Actual Time: " << elapsedTime << " seconds" << std::endl;
+
+		// save transformation
+
+		ss.str(std::string());
+		ss << DATA_DIR << "trans_scan_mi/" << boost::format("trans_result_%d_%d")%s1%s2;
+
+		std::string transResultFile = ss.str();
+		std::ofstream fout(transResultFile.c_str());
+		fout << result.inverse().matrix() << std::endl << elapsedTime << std::endl;
+		fout.close();
+
+	}
 
 	return 0;
 }
 
 void
-plotForX(Eigen::Affine3d& t, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, pcl::visualization::PCLPlotter *plotter) {
+registerPointClouds(Eigen::Affine3d& baseT, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, Eigen::Affine3d& result) {
 
-	double x,y,z,roll,pitch,yaw;
+	// cost -->
 
-	transform_get_rotation_xyz_from_affine(t, &roll, &pitch, &yaw);
-	transform_get_translation_from_affine(t, &x, &y, &z);
+	optiData* data = new optiData();
+	data->scanA = A;
+	data->scanB = B;
 
-	double xVar = x - plotRangeTrans;
-	std::vector<std::pair<double, double> > data;
+	double x, y, z, roll, pitch, yaw;
 
-	while (xVar < (x + plotRangeTrans) ) {
+	transform_get_translation_from_affine(baseT, &x, &y, &z);
+	transform_get_rotation_xyz_from_affine(baseT, &roll, &pitch, &yaw);
 
-		Eigen::Affine3d transform = Eigen::Affine3d::Identity();
-		transform.translation() << xVar,y,z;
-		transform.rotate(Eigen::AngleAxisd (yaw, Eigen::Vector3d::UnitZ()));
-		transform.rotate (Eigen::AngleAxisd (pitch, Eigen::Vector3d::UnitY()));
-		transform.rotate (Eigen::AngleAxisd (roll, Eigen::Vector3d::UnitX()));
+	std::cout << "Base Pose: " << std::endl;
 
-		pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformedScanB = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBA> > (new pcl::PointCloud<pcl::PointXYZRGBA> ());
-		pcl::transformPointCloud(*B, *transformedScanB, transform);
+	std::cout << "X: " << x << std::endl;
+	std::cout << "Y: " << y << std::endl;
+	std::cout << "Z: " << z << std::endl;
+	std::cout << "Roll: " << roll << std::endl;
+	std::cout << "Pitch: " << pitch << std::endl;
+	std::cout << "Yaw: " << yaw << std::endl;
 
-		double mi = calculateMI(A, transformedScanB);
+	//const gsl_multimin_fminimizer_type *T = gsl_multimin_fminimizer_nmsimplex2;
+	const gsl_multimin_fdfminimizer_type *T = gsl_multimin_fdfminimizer_steepest_descent;//gsl_multimin_fdfminimizer_vector_bfgs2;
+	gsl_multimin_fdfminimizer *s = NULL;
+	gsl_vector *stepSize, *basePose;
 
-		data.push_back(std::pair<double, double> (xVar, mi));
+	//gsl_multimin_function func;
+	gsl_multimin_function_fdf func;
 
-		xVar += plotStepTrans;
-	}
+	/* Base Pose */
+	basePose = gsl_vector_alloc (6);
+	gsl_vector_set (basePose, 0, x);
+	gsl_vector_set (basePose, 1, y);
+	gsl_vector_set (basePose, 2, z);
+	gsl_vector_set (basePose, 3, roll);
+	gsl_vector_set (basePose, 4, pitch);
+	gsl_vector_set (basePose, 5, yaw);
 
-	std::string labelString = (boost::format("X: %f")%x).str();
-	plotter->addPlotData(data, labelString.c_str());
+	/* Set initial step sizes to 1 */
+	stepSize = gsl_vector_alloc (6);
+	gsl_vector_set (stepSize, 0, 5);
+	gsl_vector_set (stepSize, 1, 5);
+	gsl_vector_set (stepSize, 2, 5);
+	gsl_vector_set (stepSize, 3, 0.5);
+	gsl_vector_set (stepSize, 4, 0.5);
+	gsl_vector_set (stepSize, 5, 0.5);
 
-}
+	/* Initialize method and iterate */
+	func.n = 6;
+	func.f = f;
+	func.df = df;
+	func.fdf = fdf;
+	func.params = (void*) data;
 
-void
-plotForY(Eigen::Affine3d& t, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, pcl::visualization::PCLPlotter *plotter) {
+	//s = gsl_multimin_fminimizer_alloc (T, 6);
+	//gsl_multimin_fminimizer_set (s, &func, basePose, stepSize);
 
-	double x,y,z,roll,pitch,yaw;
+	s = gsl_multimin_fdfminimizer_alloc (T, 6);
+	gsl_multimin_fdfminimizer_set (s, &func, basePose, 0.01, 1e-4);
 
-	transform_get_rotation_xyz_from_affine(t, &roll, &pitch, &yaw);
-	transform_get_translation_from_affine(t, &x, &y, &z);
+	size_t iter = 0;
+	int status;
+	double size;
 
-	double yVar = y - plotRangeTrans;
-	std::vector<std::pair<double, double> > data;
+	do  {
 
-	while (yVar < (y + plotRangeTrans) ) {
+		iter++;
+		//status = gsl_multimin_fminimizer_iterate(s);
 
-		Eigen::Affine3d transform = Eigen::Affine3d::Identity();
-		transform.translation() << x, yVar, z;
-		transform.rotate(Eigen::AngleAxisd (yaw, Eigen::Vector3d::UnitZ()));
-		transform.rotate (Eigen::AngleAxisd (pitch, Eigen::Vector3d::UnitY()));
-		transform.rotate (Eigen::AngleAxisd (roll, Eigen::Vector3d::UnitX()));
+		status = gsl_multimin_fdfminimizer_iterate (s);
 
-		pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformedScanB = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBA> > (new pcl::PointCloud<pcl::PointXYZRGBA> ());
-		pcl::transformPointCloud(*B, *transformedScanB, transform);
+		std::cout << gsl_strerror(status) << std::endl;
 
-		double mi = calculateMI(A, transformedScanB);
+		if (status)
+			break;
 
-		data.push_back(std::pair<double, double> (yVar, mi));
+		//size = gsl_multimin_fminimizer_size (s);
+		//status = gsl_multimin_test_size (size, 1e-3);
 
-		yVar += plotStepTrans;
-	}
+		status = gsl_multimin_test_gradient (s->gradient, 1e-3);
 
-	std::string labelString = (boost::format("Y: %f")%y).str();
-	plotter->addPlotData(data, labelString.c_str());
-
-}
-
-void
-plotForZ(Eigen::Affine3d& t, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, pcl::visualization::PCLPlotter *plotter) {
-
-	double x,y,z,roll,pitch,yaw;
-
-	transform_get_rotation_xyz_from_affine(t, &roll, &pitch, &yaw);
-	transform_get_translation_from_affine(t, &x, &y, &z);
-
-	double zVar = z - plotRangeTrans;
-	std::vector<std::pair<double, double> > data;
-
-	while (zVar < (z + plotRangeTrans) ) {
-
-		Eigen::Affine3d transform = Eigen::Affine3d::Identity();
-		transform.translation() << x, y, zVar;
-		transform.rotate(Eigen::AngleAxisd (yaw, Eigen::Vector3d::UnitZ()));
-		transform.rotate (Eigen::AngleAxisd (pitch, Eigen::Vector3d::UnitY()));
-		transform.rotate (Eigen::AngleAxisd (roll, Eigen::Vector3d::UnitX()));
-
-		pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformedScanB = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBA> > (new pcl::PointCloud<pcl::PointXYZRGBA> ());
-		pcl::transformPointCloud(*B, *transformedScanB, transform);
-
-		double mi = calculateMI(A, transformedScanB);
-
-		data.push_back(std::pair<double, double> (zVar, mi));
-
-		zVar += plotStepTrans;
-	}
-
-	std::string labelString = (boost::format("Z: %f")%z).str();
-	plotter->addPlotData(data, labelString.c_str());
-
-}
-
-void
-plotForRoll(Eigen::Affine3d& t, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, pcl::visualization::PCLPlotter *plotter) {
-
-	double x,y,z,roll,pitch,yaw;
-
-	transform_get_rotation_xyz_from_affine(t, &roll, &pitch, &yaw);
-	transform_get_translation_from_affine(t, &x, &y, &z);
-
-	std::vector<std::pair<double, double> > data;
-
-	double actualRollDeg = roll * 180 / M_PI;
-	double rollDegree = actualRollDeg - plotRangeAngle;
-
-	while (rollDegree <= (actualRollDeg + plotRangeAngle)) {
-
-		double rollVar = rollDegree * M_PI / 180;
-
-		Eigen::Affine3d transform = Eigen::Affine3d::Identity();
-		transform.translation() << x, y, z;
-		transform.rotate(Eigen::AngleAxisd (yaw, Eigen::Vector3d::UnitZ()));
-		transform.rotate (Eigen::AngleAxisd (pitch, Eigen::Vector3d::UnitY()));
-		transform.rotate (Eigen::AngleAxisd (rollVar, Eigen::Vector3d::UnitX()));
-
-		pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformedScanB = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBA> > (new pcl::PointCloud<pcl::PointXYZRGBA> ());
-		pcl::transformPointCloud(*B, *transformedScanB, transform);
-
-		double mi = calculateMI(A, transformedScanB);
-
-		data.push_back(std::pair<double, double> (rollDegree, mi));
-		rollDegree += plotStepAngle;
-
-	}
-
-	std::string labelString = (boost::format("Roll: %f")%actualRollDeg).str();
-	plotter->addPlotData(data, labelString.c_str());
-
-}
-
-void plotForPitch (Eigen::Affine3d& t, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, pcl::visualization::PCLPlotter *plotter) {
-
-	double x,y,z,roll,pitch,yaw;
-
-	transform_get_rotation_xyz_from_affine(t, &roll, &pitch, &yaw);
-	transform_get_translation_from_affine(t, &x, &y, &z);
-
-	std::vector<std::pair<double, double> > data;
-
-	double actualPitchDeg = pitch * 180 / M_PI;
-	double pitchDegree = actualPitchDeg - plotRangeAngle;
-
-	while (pitchDegree <= (actualPitchDeg + plotRangeAngle)) {
-
-		double pitchVar = pitchDegree * M_PI / 180;
-
-		Eigen::Affine3d transform = Eigen::Affine3d::Identity();
-		transform.translation() << x, y, z;
-		transform.rotate(Eigen::AngleAxisd (yaw, Eigen::Vector3d::UnitZ()));
-		transform.rotate (Eigen::AngleAxisd (pitchVar, Eigen::Vector3d::UnitY()));
-		transform.rotate (Eigen::AngleAxisd (roll, Eigen::Vector3d::UnitX()));
-
-		pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformedScanB = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBA> > (new pcl::PointCloud<pcl::PointXYZRGBA> ());
-		pcl::transformPointCloud(*B, *transformedScanB, transform);
-
-		double mi = calculateMI(A, transformedScanB);
-
-		data.push_back(std::pair<double, double> (pitchDegree, mi));
-		pitchDegree += plotStepAngle;
-
-	}
-
-	std::string labelString = (boost::format("Pitch: %f")%actualPitchDeg).str();
-	plotter->addPlotData(data, labelString.c_str());
-
-}
-
-void plotForYaw (Eigen::Affine3d& t, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, pcl::visualization::PCLPlotter *plotter) {
-
-	double x,y,z,roll,pitch,yaw;
-
-	transform_get_rotation_xyz_from_affine(t, &roll, &pitch, &yaw);
-	transform_get_translation_from_affine(t, &x, &y, &z);
-
-	std::vector<std::pair<double, double> > data;
-
-	double actualYawDeg = yaw * 180 / M_PI;
-	double yawDegree = actualYawDeg - plotRangeAngle;
-
-	while (yawDegree <= (actualYawDeg + plotRangeAngle)) {
-
-		double yawVar = yawDegree * M_PI / 180;
-
-		Eigen::Affine3d transform = Eigen::Affine3d::Identity();
-		transform.translation() << x, y, z;
-		transform.rotate(Eigen::AngleAxisd (yawVar, Eigen::Vector3d::UnitZ()));
-		transform.rotate (Eigen::AngleAxisd (pitch, Eigen::Vector3d::UnitY()));
-		transform.rotate (Eigen::AngleAxisd (roll, Eigen::Vector3d::UnitX()));
-
-		pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformedScanB = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBA> > (new pcl::PointCloud<pcl::PointXYZRGBA> ());
-		pcl::transformPointCloud(*B, *transformedScanB, transform);
-
-		double mi = calculateMI(A, transformedScanB);
-
-		data.push_back(std::pair<double, double> (yawDegree, mi));
-		yawDegree += plotStepAngle;
-
-	}
-
-	std::string labelString = (boost::format("Yaw: %f")%actualYawDeg).str();
-	plotter->addPlotData(data, labelString.c_str());
-
-}
-
-void getCombinedScan (pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A,
-		pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B,
-		pcl::PointCloud<pcl::PointXYZRGBL>::Ptr combinedScan,
-		pcl::octree::OctreePointCloud<pcl::PointXYZRGBL>::Ptr octree,
-		int& minXo, int& minYo,
-		int& minZo, int& maxXo,
-		int& maxYo, int& maxZo) {
-
-	octree->setResolution(RESOLUTION);
-	double minX = std::numeric_limits<float>::max (), minY = std::numeric_limits<float>::max (), minZ = std::numeric_limits<float>::max ();
-	double maxX = -std::numeric_limits<float>::max(), maxY = -std::numeric_limits<float>::max(), maxZ = -std::numeric_limits<float>::max();
-
-	for (int i = 0; i < A->size(); i++) {
-		pcl::PointXYZRGBA temp (A->points[i]);
-
-		if (!pcl::isFinite (temp)) //Check to make sure transform didn't make point not finite
-			continue;
-
-		if (temp.x < minX)
-			minX = temp.x;
-		if (temp.y < minY)
-			minY = temp.y;
-		if (temp.z < minZ)
-			minZ = temp.z;
-		if (temp.x > maxX)
-			maxX = temp.x;
-		if (temp.y > maxY)
-			maxY = temp.y;
-		if (temp.z > maxZ)
-			maxZ = temp.z;
-
-		pcl::PointXYZRGBL p;
-		p.x = temp.x;
-		p.y = temp.y;
-		p.z = temp.z;
-		p.r = temp.r;
-		p.g = temp.g;
-		p.b = temp.b;
-		p.label = 0;
-
-		combinedScan->push_back(p);
-	}
-
-	double minX_A = minX, minY_A = minY, minZ_A = minZ;
-	double maxX_A = maxX, maxY_A = maxY, maxZ_A = maxZ;
-
-	minX = std::numeric_limits<float>::max (), minY = std::numeric_limits<float>::max (), minZ = std::numeric_limits<float>::max ();
-	maxX = -std::numeric_limits<float>::max(), maxY = -std::numeric_limits<float>::max(), maxZ = -std::numeric_limits<float>::max();
-
-	for (int i = 0; i < B->size(); i++) {
-
-		pcl::PointXYZRGBA temp (B->points[i]);
-
-		if (!pcl::isFinite (temp)) //Check to make sure transform didn't make point not finite
-			continue;
-
-		if (temp.x < minX)
-			minX = temp.x;
-		if (temp.y < minY)
-			minY = temp.y;
-		if (temp.z < minZ)
-			minZ = temp.z;
-		if (temp.x > maxX)
-			maxX = temp.x;
-		if (temp.y > maxY)
-			maxY = temp.y;
-		if (temp.z > maxZ)
-			maxZ = temp.z;
-
-		pcl::PointXYZRGBL p;
-		p.x = temp.x;
-		p.y = temp.y;
-		p.z = temp.z;
-		p.r = temp.r;
-		p.g = temp.g;
-		p.b = temp.b;
-		p.label = 1;
-
-		combinedScan->push_back(p);
-	}
-
-	double minX_B = minX, minY_B = minY, minZ_B = minZ;
-	double maxX_B = maxX, maxY_B = maxY, maxZ_B = maxZ;
-
-	minX = std::min(minX_A, minX_B);
-	maxX = std::max(maxX_A, maxX_B);
-	minY = std::min(minY_A, minY_B);
-	maxY = std::max(maxY_A, maxY_B);
-	minZ = std::min(minZ_A, minZ_B);
-	maxZ = std::max(maxZ_A, maxZ_B);
-
-	octree->defineBoundingBox (floor(minX), floor(minY), floor(minZ), ceil(maxX), ceil(maxY), ceil(maxZ) );
-	octree->setInputCloud(combinedScan);
-	octree->addPointsFromInputCloud();
-	octree->getBoundingBox(minX, minY, minZ, maxX, maxY, maxZ);
-
-//	cout << "MinX: " << minX << std::endl;
-//	cout << "MinY: " << minY << std::endl;
-//	cout << "MinZ: " << minZ << std::endl;
-//	cout << "MaxX: " << maxX << std::endl;
-//	cout << "MaxY: " << maxY << std::endl;
-//	cout << "MaxZ: " << maxZ << std::endl;
-
-	minXo = floor(std::max(minX_A, minX_B));
-	minYo = floor(std::max(minY_A, minY_B));
-	minZo = floor(std::max(minZ_A, minZ_B));
-
-	maxXo = ceil(std::min(maxX_A, maxX_B));
-	maxYo = ceil(std::min(maxY_A, maxY_B));
-	maxZo = ceil(std::min(maxZ_A, maxZ_B));
-
-//	cout << "MinXo: " << minXo << std::endl;
-//	cout << "MinYo: " << minYo << std::endl;
-//	cout << "MinZo: " << minZo << std::endl;
-//	cout << "MaxXo: " << maxXo << std::endl;
-//	cout << "MaxYo: " << maxYo << std::endl;
-//	cout << "MaxZo: " << maxZo << std::endl;
-
-}
-
-double calculateMI (pcl::PointCloud<pcl::PointXYZRGBA>::Ptr scanA,
-		pcl::PointCloud<pcl::PointXYZRGBA>::Ptr scanB) {
-
-	long maxPointsInVoxelForEachScan = 10000;
-	int minXo, minYo, minZo;
-	int maxXo, maxYo, maxZo;
-
-	std::vector<std::pair<double, double> > data;
-
-	pcl::PointCloud<pcl::PointXYZRGBL>::Ptr combinedScan = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBL> > (new pcl::PointCloud<pcl::PointXYZRGBL> ());
-	pcl::octree::OctreePointCloud<pcl::PointXYZRGBL>::Ptr octree = boost::shared_ptr <pcl::octree::OctreePointCloud<pcl::PointXYZRGBL> > (new pcl::octree::OctreePointCloud<pcl::PointXYZRGBL> (RESOLUTION));
-
-	getCombinedScan(scanA, scanB, combinedScan, octree, minXo, minYo, minZo, maxXo, maxYo, maxZo);
-
-	typename pcl::octree::OctreePointCloud<pcl::PointXYZRGBL>::LeafNodeIterator iterator = octree->leaf_begin();
-	std::vector<int> indexVector;
-
-	boost::unordered::unordered_map<int, int> umapA;
-	boost::unordered::unordered_map<int, int> umapB;
-	boost::unordered::unordered_map<long, int> umapAB;
-
-	int overlappingLeavesInOctree = 0;
-	while (iterator != octree->leaf_end()) {
-
-		typename pcl::octree::OctreePointCloud<pcl::PointXYZRGBA>::LeafNode *leafNode = (typename pcl::octree::OctreePointCloud<pcl::PointXYZRGBA>::LeafNode*) *iterator;
-
-		indexVector.clear();
-		leafNode->getContainer().getPointIndices(indexVector);
-
-		int pointsFromA(0), pointsFromB(0);
-
-		pcl::PointXYZRGBL p;
-		for (int i = 0; i < indexVector.size(); i++) {
-
-			int scanIndex = indexVector[i];
-			p = combinedScan->at(scanIndex);
-
-			if (p.label == 0)
-				pointsFromA++;
-			else
-				pointsFromB++;
+		if (status == GSL_SUCCESS)
+		{
+			std::cout << "Converged to minimum at\n";
 		}
 
-		int xleafMin, xLeafMax, yLeafMin, yLeafMax, zLeafMin, zLeafMax;
-		xleafMin = p.x;
-		yLeafMin = p.y;
-		zLeafMin = p.z;
+		std::cout << "Iteration: " << iter << std::endl;
+		std::cout << "Cost: " << s->f << std::endl;
 
-		// TODO this only work for RESOLUTION = 1
-		// change logic
-		if (p.x < 0)
-			xleafMin--;
-		if (p.y < 0)
-			yLeafMin--;
-		if (p.z < 0)
-			zLeafMin--;
+		std::cout << "X: " << gsl_vector_get (s->x, 0) << std::endl;
+		std::cout << "Y: " << gsl_vector_get (s->x, 1) << std::endl;
+		std::cout << "Z: " << gsl_vector_get (s->x, 2) << std::endl;
+		std::cout << "Roll: " << gsl_vector_get (s->x, 3) << std::endl;
+		std::cout << "Pitch: " << gsl_vector_get (s->x, 4) << std::endl;
+		std::cout << "Yaw: " << gsl_vector_get (s->x, 5) << std::endl;
 
-		xLeafMax = xleafMin + RESOLUTION;
-		yLeafMax = yLeafMin + RESOLUTION;
-		zLeafMax = zLeafMin + RESOLUTION;
+		//std::cout << "Size: " << size << std::endl;
 
-		// check leaf in overlapping region
+	}   while (status == GSL_CONTINUE && iter < 500);
 
-		if (	xleafMin > minXo && xLeafMax < maxXo &&
-				yLeafMin > minYo && yLeafMax < maxYo &&
-				zLeafMin > minZo && zLeafMax < maxZo) {
+	gsl_multimin_fdfminimizer_free (s);
+	gsl_vector_free (basePose);
 
-			// leaf in overlapping region
-			overlappingLeavesInOctree++;
+	x = gsl_vector_get (s->x, 0);
+	y = gsl_vector_get (s->x, 1);
+	z = gsl_vector_get (s->x, 2);
+	roll = gsl_vector_get (s->x, 3);
+	pitch = gsl_vector_get (s->x, 4);
+	yaw = gsl_vector_get (s->x, 5);
 
-			if (umapA.find(pointsFromA) == umapA.end())
-				umapA.insert(std::pair<int, int> (pointsFromA, 1));
-			else
-				umapA[pointsFromA]++;
+	result = Eigen::Affine3d::Identity();
+	result.translation() << x,y,z;
+	result.rotate(Eigen::AngleAxisd (yaw, Eigen::Vector3d::UnitZ()));
+	result.rotate (Eigen::AngleAxisd (pitch, Eigen::Vector3d::UnitY()));
+	result.rotate (Eigen::AngleAxisd (roll, Eigen::Vector3d::UnitX()));
 
-			if (umapB.find(pointsFromB) == umapB.end())
-				umapB.insert(std::pair<int, int> (pointsFromB, 1));
-			else
-				umapB[pointsFromB]++;
+}
 
-			long key = pointsFromA * maxPointsInVoxelForEachScan + pointsFromB;
+void
+registerPointCloudsUsingPatternSearch (Eigen::Affine3d& baseT, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, Eigen::Affine3d& result) {
 
-			if (umapAB.find(key) == umapAB.end()) {
-				umapAB.insert(std::pair<long, int> (key, 1));
-			} else {
-				umapAB[key]++;
+	// cost -->
+
+	optiData* data = new optiData();
+	data->scanA = A;
+	data->scanB = B;
+
+	double x, y, z, roll, pitch, yaw;
+
+	transform_get_translation_from_affine(baseT, &x, &y, &z);
+	transform_get_rotation_xyz_from_affine(baseT, &roll, &pitch, &yaw);
+
+	std::cout << "Base Pose: " << std::endl;
+
+	std::cout << "X: " << x << std::endl;
+	std::cout << "Y: " << y << std::endl;
+	std::cout << "Z: " << z << std::endl;
+	std::cout << "Roll: " << roll << std::endl;
+	std::cout << "Pitch: " << pitch << std::endl;
+	std::cout << "Yaw: " << yaw << std::endl;
+
+	const gsl_multimin_fminimizer_type *T = gsl_multimin_fminimizer_nmsimplex2;
+
+	gsl_multimin_fminimizer *s = NULL;
+	gsl_vector *stepSize, *basePose;
+
+	//gsl_multimin_function func;
+	gsl_multimin_function func;
+
+	/* Base Pose */
+	basePose = gsl_vector_alloc (6);
+	gsl_vector_set (basePose, 0, x);
+	gsl_vector_set (basePose, 1, y);
+	gsl_vector_set (basePose, 2, z);
+	gsl_vector_set (basePose, 3, roll);
+	gsl_vector_set (basePose, 4, pitch);
+	gsl_vector_set (basePose, 5, yaw);
+
+	/* Set initial step sizes to 1 */
+	stepSize = gsl_vector_alloc (6);
+	gsl_vector_set (stepSize, 0, 5);
+	gsl_vector_set (stepSize, 1, 5);
+	gsl_vector_set (stepSize, 2, 2);
+	gsl_vector_set (stepSize, 3, 0.5);
+	gsl_vector_set (stepSize, 4, 0.5);
+	gsl_vector_set (stepSize, 5, 0.5);
+
+	/* Initialize method and iterate */
+	func.n = 6;
+	func.f = f;
+	func.params = (void*) data;
+
+	s = gsl_multimin_fminimizer_alloc (T, 6);
+	gsl_multimin_fminimizer_set (s, &func, basePose, stepSize);
+
+	size_t iter = 0;
+	int status;
+	double size;
+
+	do  {
+
+		iter++;
+		status = gsl_multimin_fminimizer_iterate(s);
+
+		std::cout << gsl_strerror(status) << std::endl;
+
+		if (status)
+			break;
+
+		size = gsl_multimin_fminimizer_size (s);
+		status = gsl_multimin_test_size (size, 1e-3);
+
+		if (status == GSL_SUCCESS)
+		{
+			std::cout << "Converged to minimum at\n";
+		}
+
+		std::cout << "Iteration: " << iter << std::endl;
+		std::cout << "Cost: " << s->fval << std::endl;
+
+		std::cout << "X: " << gsl_vector_get (s->x, 0) << std::endl;
+		std::cout << "Y: " << gsl_vector_get (s->x, 1) << std::endl;
+		std::cout << "Z: " << gsl_vector_get (s->x, 2) << std::endl;
+		std::cout << "Roll: " << gsl_vector_get (s->x, 3) << std::endl;
+		std::cout << "Pitch: " << gsl_vector_get (s->x, 4) << std::endl;
+		std::cout << "Yaw: " << gsl_vector_get (s->x, 5) << std::endl;
+
+	}   while (status == GSL_CONTINUE && iter < 500);
+
+	gsl_vector_free (basePose);
+
+	x = gsl_vector_get (s->x, 0);
+	y = gsl_vector_get (s->x, 1);
+	z = gsl_vector_get (s->x, 2);
+	roll = gsl_vector_get (s->x, 3);
+	pitch = gsl_vector_get (s->x, 4);
+	yaw = gsl_vector_get (s->x, 5);
+
+	result = Eigen::Affine3d::Identity();
+	result.translation() << x,y,z;
+	result.rotate(Eigen::AngleAxisd (yaw, Eigen::Vector3d::UnitZ()));
+	result.rotate (Eigen::AngleAxisd (pitch, Eigen::Vector3d::UnitY()));
+	result.rotate (Eigen::AngleAxisd (roll, Eigen::Vector3d::UnitX()));
+
+}
+
+void naivePoseSearch (pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B, Eigen::Affine3d& transform) {
+
+	double x,y,z,roll,pitch,yaw;
+
+	transform_get_translation_from_affine(transform, &x, &y, &z);
+	transform_get_rotation_xyz_from_affine(transform, &roll, &pitch, &yaw);
+
+	double transRange = 5;
+	double angleRange = 1.57;
+
+	double transStep = 1.; // 50 cm
+	double angleStep = 0.2; // appx - 5.7 degree
+
+	double headingVar = yaw - angleRange;
+
+	double maxMi = -1;
+
+	double Xo, Yo, Yawo;
+
+	pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformedScanB = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBA> > (new pcl::PointCloud<pcl::PointXYZRGBA> ());
+
+	while ( headingVar < (yaw+angleRange) ) {
+
+		double xVar = x - transRange;
+
+		while (xVar < (x+transRange) ) {
+
+			double yVar = y - transRange;
+
+			while (yVar < (y+transRange) ) {
+
+				Eigen::Affine3d t = Eigen::Affine3d::Identity();
+
+				t.translation() << xVar, yVar, z;
+				t.rotate(Eigen::AngleAxisd (headingVar, Eigen::Vector3d::UnitZ()));
+				t.rotate (Eigen::AngleAxisd (pitch, Eigen::Vector3d::UnitY()));
+				t.rotate (Eigen::AngleAxisd (roll, Eigen::Vector3d::UnitX()));
+
+				pcl::transformPointCloud(*B, *transformedScanB, t);
+
+				double mi = calculateMI(A, transformedScanB, 1);
+				std::cout << "yaw: " << headingVar << " XVar: " << xVar << " yVar: " << yVar << " MI: " << mi << std::endl;
+
+				if (mi>maxMi) {
+					Xo = xVar;
+					Yo = yVar;
+					Yawo = headingVar;
+					maxMi = mi;
+				}
+
+				yVar += transStep;
 			}
-
-			data.push_back(std::pair<int, int> (pointsFromA, pointsFromB));
-
+			xVar += transStep;
 		}
-
-		iterator++;
+		headingVar += angleStep;
 	}
 
+	std::cout << "Optimum MI " << std::endl;
+	std::cout << "yawO: " << Yawo << " Xo: " << Xo << " yVar: " << Yo << " MI: " << maxMi << std::endl;
 
-	long total = (maxXo - minXo) * (maxYo - minYo) * (maxZo - minZo);
-//	cout << "Total voxels including empty space in overlapping cuboid: " << total << std::endl;
 
-	long leavesNotInOctree = total-overlappingLeavesInOctree;
-
-	if (umapA.find(0) == umapA.end()) {
-		umapA.insert(std::pair<int, int> (0, leavesNotInOctree));
-	} else {
-		umapA[0] += leavesNotInOctree;
-	}
-
-	if (umapB.find(0) == umapB.end()) {
-		umapB.insert(std::pair<int, int> (0, leavesNotInOctree));
-	} else {
-		umapB[0] += leavesNotInOctree;
-	}
-
-	umapAB.insert(std::pair<long, int> (0, leavesNotInOctree));
-
-	double jointEntropy(0), marginalEntropyA(0), marginalEntropyB(0);
-
-	boost::unordered::unordered_map<int, int>::iterator itr = umapA.begin();
-	while (itr != umapA.end()) {
-
-		double probability = ( (double) itr->second) / total;
-		marginalEntropyA += -probability * log(probability);
-
-		itr++;
-	}
-
-	itr = umapB.begin();
-	while (itr != umapB.end()) {
-
-		double probability = ( (double) itr->second) / total;
-		marginalEntropyB += -probability * log(probability);
-
-		itr++;
-	}
-
-	boost::unordered::unordered_map<long, int>::iterator itrAB = umapAB.begin();
-	while (itrAB != umapAB.end()) {
-
-		double probability = ( (double) itrAB->second) / total;
-		jointEntropy += -probability * log(probability);
-
-		itrAB++;
-	}
-
-//	cout << "Marginal Entropy A: " << marginalEntropyA << std::endl;
-//	cout << "Marginal Entropy B: " << marginalEntropyB << std::endl;
-//	cout << "Joint Entropy: " << jointEntropy << std::endl;
-
-	double mi = marginalEntropyA + marginalEntropyB - jointEntropy;
-
-	if (plotJointHistogram) {
-		pcl::visualization::PCLPlotter *plotter;
-		plotter = new pcl::visualization::PCLPlotter("Joint Histogram Plot");
-		plotter->setXTitle("A");
-		plotter->setYTitle("B");
-
-		plotter->setTitle(transFilename.c_str());
-		plotter->addPlotData(data, "Joint Histogram", vtkChart::POINTS);
-		plotter->plot();
-	}
-
-	return mi;
 }
+
+struct pose_search {
+
+	double x;
+	double y;
+	double heading;
+	double cost;
+
+};
+
+class ComparePose {
+public:
+	bool operator() (pose_search& t1, pose_search& t2)
+	{
+
+		return t1.cost > t2.cost;
+
+	}
+};
+
+#define TRANS_STEP 0.5
+#define ANGLE_STEP 0.1
 
 void
-loadTransform(std::string filename, Eigen::Affine3d& transform) {
+branchAndBoundSearch (
+		pcl::PointCloud<pcl::PointXYZRGBA>::Ptr A,
+		pcl::PointCloud<pcl::PointXYZRGBA>::Ptr B,
+		Eigen::Affine3d& transform) {
 
-	std::cout << "Loading Transformation: " << filename << std::endl;
-	transform = Eigen::Affine3d::Identity();
-	std::ifstream in(filename.c_str());
-	if (!in) {
-		std::stringstream err;
-		err << "Error loading transformation " << filename.c_str() << std::endl;
-		std::cerr << err.str();
-	}
 
-	std::string line;
-	for (int i = 0; i < 4; i++) {
-		std::getline(in,line);
+	double x,y,z,roll,pitch,yaw;
 
-		std::istringstream sin(line);
-		for (int j = 0; j < 4; j++) {
-			sin >> transform (i,j);
+	transform_get_translation_from_affine(transform, &x, &y, &z);
+	transform_get_rotation_xyz_from_affine(transform, &roll, &pitch, &yaw);
+
+	double transRange = 5;
+	double angleRange = 0.5;
+
+	float resolution = 8;
+	float angleStep = resolution*ANGLE_STEP;
+	float transStep = resolution*TRANS_STEP;
+
+	double headingVar = yaw - angleRange;
+
+	pcl::PointCloud<pcl::PointXYZRGBA>::Ptr transformedScanB = boost::shared_ptr <pcl::PointCloud<pcl::PointXYZRGBA> > (new pcl::PointCloud<pcl::PointXYZRGBA> ());
+	Eigen::Affine3d t = Eigen::Affine3d::Identity();
+	std::priority_queue<pose_search, std::vector<pose_search>, ComparePose > miQueue;
+
+	std::cout << "RESOLUTION: " << resolution << std::endl;
+	while ( headingVar < (yaw+angleRange) ) {
+
+		t = Eigen::Affine3d::Identity();
+		t.rotate(Eigen::AngleAxisd (headingVar, Eigen::Vector3d::UnitZ()));
+		t.rotate (Eigen::AngleAxisd (pitch, Eigen::Vector3d::UnitY()));
+		t.rotate (Eigen::AngleAxisd (roll, Eigen::Vector3d::UnitX()));
+
+		//
+		double xVar = x - transRange;
+
+		while (xVar < (x+transRange) ) {
+
+			double yVar = y - transRange;
+
+			while (yVar < (y+transRange) ) {
+
+				t.translation() << xVar, yVar, z;
+				pcl::transformPointCloud(*B, *transformedScanB, t);
+
+				double mi = calculateMIFromMap(A, transformedScanB, resolution);
+
+				pose_search ps;
+				ps.x = xVar;
+				ps.y = yVar;
+				ps.heading = headingVar;
+				ps.cost = -mi;
+
+				miQueue.push(ps);
+
+				std::cout << "yaw: " << headingVar << " XVar: " << xVar << " yVar: " << yVar << " MI: " << mi << std::endl;
+
+				yVar += transStep;
+			}
+			xVar += transStep;
 		}
+		headingVar += angleStep;
 	}
 
-	in.close();
+	std::cout << "Optimum MI " << std::endl;
+	pose_search Xo = miQueue.top();
+
+	std::cout << "yaw: " << Xo.heading << " xVar: " << Xo.x << " yVar: " << Xo.y << " MI: " << Xo.cost << std::endl;
+
+	//while (!miQueue.em)
 
 }
 
 
-void inline
-transform_get_translation_from_affine(Eigen::Affine3d& t, double *x, double *y, double *z) {
-	*x = t(0,3);
-	*y = t(1,3);
-	*z = t(2,3);
-}
-
-void inline
-transform_get_rotation_xyz_from_affine(Eigen::Affine3d& t, double *x, double *y, double *z) {
-	double a = t(0,0); // cycz
-	double b = t(0,1); // -cysz
-	double c = t(0,2); // sy
-	double d = t(1,2); // -sxcy
-	double e = t(2,2); // cxcy
-
-	*y = asin(c);
-	*z = atan2(-b, a);
-	*x = atan2(-d, e);
-}
